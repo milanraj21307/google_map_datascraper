@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Lead Enrichment Dashboard</title>
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f5f7fb;
+      margin: 0;
+      padding: 20px;
+    }
+
+    h1 {
+      margin-bottom: 6px;
+    }
+
+    p {
+      margin-top: 0;
+      color: #475569;
+    }
+
+    .actions {
+      margin-bottom: 15px;
+      display: flex;
+      gap: 10px;
+    }
+
+    button {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    button:hover {
+      background: #1e40af;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    }
+
+    th, td {
+      padding: 10px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+      font-size: 13px;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f1f5f9;
+      font-weight: bold;
+    }
+
+    tr:hover {
+      background: #f9fafb;
+    }
+
+    /* Status colors */
+    .status-pending {
+      color: #d97706;
+      font-weight: bold;
+    }
+
+    .status-processing {
+      color: #2563eb;
+      font-weight: bold;
+    }
+
+    .status-done {
+      color: #16a34a;
+      font-weight: bold;
+    }
+
+    .status-error {
+      color: #b91c1c;
+      font-weight: bold;
+    }
+
+    .validation-ok {
+      color: #16a34a;
+      font-weight: bold;
+    }
+
+    .validation-bad {
+      color: #b91c1c;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h1>Google Maps Lead Enrichment</h1>
+  <p>Raw scraped leads → background processing → validated dataset</p>
+
+  <div class="actions">
+    <button onclick="downloadCSV()">⬇ Download Final CSV</button>
+    <button onclick="loadData()">🔄 Refresh</button>
+  </div>
+
+  <table id="leadsTable">
+    <thead>
+      <tr>
+        <th>State</th>
+        <th>Company</th>
+        <th>Phone</th>
+        <th>Email</th>
+        <th>Website</th>
+        <th>Processing</th>
+        <th>Validation</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    async function loadData() {
+      const res = await fetch("/companies");
+      const data = await res.json();
+
+      const tbody = document.querySelector("#leadsTable tbody");
+      tbody.innerHTML = "";
+
+      data.forEach(row => {
+        const processingClass = row.processing_status
+          ? "status-" + row.processing_status
+          : "";
+
+        const validationClass =
+          row.validation_status === "OK"
+            ? "validation-ok"
+            : "validation-bad";
+
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${row.state || ""}</td>
+          <td>${row.name || ""}</td>
+          <td>${row.phone || ""}</td>
+          <td>${row.email || ""}</td>
+          <td>
+            ${
+              row.website
+                ? `<a href="${row.website}" target="_blank">Visit</a>`
+                : ""
+            }
+          </td>
+          <td class="${processingClass}">
+            ${row.processing_status || ""}
+          </td>
+          <td class="${validationClass}">
+            ${row.validation_status || ""}
+          </td>
+        `;
+
+        tbody.appendChild(tr);
+      });
+    }
+
+    function downloadCSV() {
+      window.location.href = "/export-csv";
+    }
+
+    loadData();
+  </script>
+
+</body>
+</html>
