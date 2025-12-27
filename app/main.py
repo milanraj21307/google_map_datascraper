@@ -1,6 +1,15 @@
-from fastapi import FastAPI, UploadFile, File, Depends, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi import (
+    FastAPI,
+    UploadFile,
+    File,
+    Depends,
+    HTTPException,
+    BackgroundTasks,
+)
+from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+from pathlib import Path
 from io import StringIO
 import pandas as pd
 import csv
@@ -17,11 +26,33 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Google Maps Lead Enrichment System")
 
 # -------------------------
-# Root check
+# Serve frontend files
+# -------------------------
+FRONTEND_DIR = Path("frontend")
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+
+
+# -------------------------
+# Dashboard route
+# -------------------------
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    html_file = FRONTEND_DIR / "index.html"
+    if not html_file.exists():
+        return HTMLResponse(
+            "<h2>Dashboard file not found</h2>",
+            status_code=500,
+        )
+    return html_file.read_text(encoding="utf-8")
+
+
+# -------------------------
+# Root health check
 # -------------------------
 @app.get("/")
 def root():
     return {"status": "running"}
+
 
 # -------------------------
 # Helper: safe column getter
@@ -32,17 +63,18 @@ def _get(row, *keys):
             return str(row[key]).strip()
     return None
 
+
 # -------------------------
 # BACKGROUND ENRICHMENT
-# (only pending / unprocessed rows)
+# (only unprocessed rows)
 # -------------------------
 def enrich_all_companies():
     db = SessionLocal()
     try:
         companies = (
             db.query(Company)
-              .filter(Company.processed == False)
-              .all()
+            .filter(Company.processed == False)
+            .all()
         )
 
         for company in companies:
@@ -52,14 +84,15 @@ def enrich_all_companies():
     finally:
         db.close()
 
+
 # -------------------------
-# UPLOAD CSV
+# UPLOAD CSV / EXCEL
 # -------------------------
 @app.post("/upload-csv")
 def upload_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
     filename = file.filename.lower()
 
@@ -71,15 +104,22 @@ def upload_csv(
                 file.file,
                 encoding="latin-1",
                 engine="python",
-                on_bad_lines="skip"
+                on_bad_lines="skip",
             )
         else:
-            raise HTTPException(status_code=400, detail="Upload CSV or Excel")
+            raise HTTPException(
+                status_code=400,
+                detail="Upload CSV or Excel file",
+            )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     # Clean column names
-    df.columns = df.columns.astype(str).str.replace("ï»¿", "").str.strip()
+    df.columns = (
+        df.columns.astype(str)
+        .str.replace("ï»¿", "")
+        .str.strip()
+    )
 
     # Insert rows as PENDING
     for _, row in df.iterrows():
@@ -91,7 +131,6 @@ def upload_csv(
             website=_get(row, "Website", "URL"),
             source=_get(row, "Source") or "google_maps",
 
-            # 🔥 NEW STATUS FIELDS
             processing_status="pending",
             processed=False,
         )
@@ -99,23 +138,54 @@ def upload_csv(
 
     db.commit()
 
-    # 🚀 NON-BLOCKING enrichment
+    # Run enrichment asynchronously
     background_tasks.add_task(enrich_all_companies)
 
     return {
         "message": "File uploaded. Enrichment running in background.",
-        "rows": len(df)
+        "rows": len(df),
     }
 
+
 # -------------------------
-# View companies (with status)
+# VIEW COMPANIES
 # -------------------------
 @app.get("/companies")
 def get_companies(db: Session = Depends(get_db)):
     return db.query(Company).all()
 
+
 # -------------------------
-# Export FINAL CSV
+# PROGRESS COUNTER
+# -------------------------
+@app.get("/progress")
+def get_progress(db: Session = Depends(get_db)):
+    total = db.query(Company).count()
+    done = db.query(Company).filter(Company.processing_status == "done").count()
+    processing = db.query(Company).filter(
+        Company.processing_status == "processing"
+    ).count()
+    pending = db.query(Company).filter(
+        Company.processing_status == "pending"
+    ).count()
+    error = db.query(Company).filter(
+        Company.processing_status == "error"
+    ).count()
+
+    percent = int((done / total) * 100) if total > 0 else 0
+
+    return {
+        "total": total,
+        "done": done,
+        "processing": processing,
+        "pending": pending,
+        "error": error,
+        "percent": percent,
+    }
+
+
+# -------------------------
+# EXPORT FINAL CSV
 # -------------------------
 @app.get("/export-csv")
 def export_csv(db: Session = Depends(get_db)):
@@ -156,5 +226,7 @@ def export_csv(db: Session = Depends(get_db)):
     return StreamingResponse(
         output,
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=final_leads.csv"},
+        headers={
+            "Content-Disposition": "attachment; filename=final_leads.csv"
+        },
     )

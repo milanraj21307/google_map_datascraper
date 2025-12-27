@@ -6,9 +6,9 @@ venv/
 __pycache__/
 *.pyc
 
-# Database
+# Database (optional – see note below)
 leads.db
 
-# OS / editor
+# OS / editor files
 .DS_Store
 .vscode/
