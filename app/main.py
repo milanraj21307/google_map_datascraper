@@ -26,25 +26,22 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Google Maps Lead Enrichment System")
 
 # -------------------------
-# Serve frontend files
+# Serve frontend
 # -------------------------
-FRONTEND_DIR = Path("frontend")
-app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
+app.mount(
+    "/static",
+    StaticFiles(directory=FRONTEND_DIR),
+    name="static",
+)
 
-# -------------------------
-# Dashboard route
-# -------------------------
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
-    html_file = FRONTEND_DIR / "index.html"
-    if not html_file.exists():
-        return HTMLResponse(
-            "<h2>Dashboard file not found</h2>",
-            status_code=500,
-        )
-    return html_file.read_text(encoding="utf-8")
-
+    index_file = FRONTEND_DIR / "index.html"
+    if not index_file.exists():
+        raise HTTPException(500, "Dashboard not found")
+    return index_file.read_text(encoding="utf-8")
 
 # -------------------------
 # Root health check
@@ -53,20 +50,19 @@ def dashboard():
 def root():
     return {"status": "running"}
 
-
 # -------------------------
-# Helper: safe column getter
+# Helper: safe CSV getter
 # -------------------------
 def _get(row, *keys):
     for key in keys:
-        if key in row and pd.notna(row[key]) and str(row[key]).strip():
-            return str(row[key]).strip()
+        if key in row and pd.notna(row[key]):
+            val = str(row[key]).strip()
+            if val:
+                return val
     return None
-
 
 # -------------------------
 # BACKGROUND ENRICHMENT
-# (only unprocessed rows)
 # -------------------------
 def enrich_all_companies():
     db = SessionLocal()
@@ -78,12 +74,14 @@ def enrich_all_companies():
         )
 
         for company in companies:
-            process_company(company)
+            try:
+                process_company(company)
+            except Exception:
+                company.processing_status = "error"
 
         db.commit()
     finally:
         db.close()
-
 
 # -------------------------
 # UPLOAD CSV / EXCEL
@@ -97,7 +95,7 @@ def upload_csv(
     filename = file.filename.lower()
 
     try:
-        if filename.endswith(".xlsx") or filename.endswith(".xls"):
+        if filename.endswith((".xlsx", ".xls")):
             df = pd.read_excel(file.file)
         elif filename.endswith(".csv"):
             df = pd.read_csv(
@@ -107,21 +105,16 @@ def upload_csv(
                 on_bad_lines="skip",
             )
         else:
-            raise HTTPException(
-                status_code=400,
-                detail="Upload CSV or Excel file",
-            )
+            raise HTTPException(400, "Upload CSV or Excel file")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(400, str(e))
 
-    # Clean column names
     df.columns = (
         df.columns.astype(str)
         .str.replace("ï»¿", "")
         .str.strip()
     )
 
-    # Insert rows as PENDING
     for _, row in df.iterrows():
         company = Company(
             name=_get(row, "Company name", "Company Name", "Name", "Company"),
@@ -130,7 +123,6 @@ def upload_csv(
             phone=_get(row, "Phone Number", "Phone"),
             website=_get(row, "Website", "URL"),
             source=_get(row, "Source") or "google_maps",
-
             processing_status="pending",
             processed=False,
         )
@@ -138,7 +130,6 @@ def upload_csv(
 
     db.commit()
 
-    # Run enrichment asynchronously
     background_tasks.add_task(enrich_all_companies)
 
     return {
@@ -146,33 +137,25 @@ def upload_csv(
         "rows": len(df),
     }
 
-
 # -------------------------
-# VIEW COMPANIES
+# GET COMPANIES
 # -------------------------
 @app.get("/companies")
 def get_companies(db: Session = Depends(get_db)):
-    return db.query(Company).all()
-
+    return db.query(Company).order_by(Company.id.desc()).all()
 
 # -------------------------
-# PROGRESS COUNTER
+# PROGRESS
 # -------------------------
 @app.get("/progress")
 def get_progress(db: Session = Depends(get_db)):
     total = db.query(Company).count()
     done = db.query(Company).filter(Company.processing_status == "done").count()
-    processing = db.query(Company).filter(
-        Company.processing_status == "processing"
-    ).count()
-    pending = db.query(Company).filter(
-        Company.processing_status == "pending"
-    ).count()
-    error = db.query(Company).filter(
-        Company.processing_status == "error"
-    ).count()
+    processing = db.query(Company).filter(Company.processing_status == "processing").count()
+    pending = db.query(Company).filter(Company.processing_status == "pending").count()
+    error = db.query(Company).filter(Company.processing_status == "error").count()
 
-    percent = int((done / total) * 100) if total > 0 else 0
+    percent = int((done / total) * 100) if total else 0
 
     return {
         "total": total,
@@ -183,9 +166,8 @@ def get_progress(db: Session = Depends(get_db)):
         "percent": percent,
     }
 
-
 # -------------------------
-# EXPORT FINAL CSV
+# EXPORT CSV
 # -------------------------
 @app.get("/export-csv")
 def export_csv(db: Session = Depends(get_db)):
@@ -226,8 +208,48 @@ def export_csv(db: Session = Depends(get_db)):
     return StreamingResponse(
         output,
         media_type="text/csv",
-        headers={
-            "Content-Disposition": "attachment; filename=final_leads.csv"
-        },
+        headers={"Content-Disposition": "attachment; filename=final_leads.csv"},
     )
-  
+
+# -------------------------
+# ACTION ENDPOINTS (Dashboard buttons)
+# -------------------------
+@app.post("/companies/{company_id}/retry")
+def retry_company(company_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(404, "Company not found")
+
+    company.processed = False
+    company.processing_status = "pending"
+    db.commit()
+
+    background_tasks.add_task(enrich_all_companies)
+    return {"message": "Company re-queued"}
+
+@app.post("/companies/retry-failed")
+def retry_failed(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    failed = db.query(Company).filter(Company.processing_status == "error").all()
+    for c in failed:
+        c.processed = False
+        c.processing_status = "pending"
+    db.commit()
+
+    background_tasks.add_task(enrich_all_companies)
+    return {"message": "Failed companies re-queued", "count": len(failed)}
+
+@app.delete("/companies/{company_id}")
+def delete_company(company_id: int, db: Session = Depends(get_db)):
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(404, "Company not found")
+
+    db.delete(company)
+    db.commit()
+    return {"message": "Deleted"}
+
+@app.delete("/companies")
+def clear_all(db: Session = Depends(get_db)):
+    db.query(Company).delete()
+    db.commit()
+    return {"message": "All companies deleted"}
